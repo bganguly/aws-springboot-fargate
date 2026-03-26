@@ -4,8 +4,10 @@ React UI + Spring Boot backend designed for an AWS-first deployment model.
 
 ## Live endpoints
 
-- UI: https://d30qivwhuhrmm1.cloudfront.net
-- API: https://de1to9rly31y0.cloudfront.net
+The values below are placeholders (masked):
+
+- UI: https://{frontend-cloudfront-domain}
+- API: https://{api-cloudfront-domain}
 
 ## Local Docker requirement
 
@@ -116,7 +118,7 @@ Quick checks:
 
 ```bash
 aws cloudformation describe-stacks --stack-name <stack-name> --region <region> --query "Stacks[0].StackStatus" --output text
-aws ecs describe-services --cluster aws-springboot-jobs --services <service-name> --region <region> --query "services[0].[runningCount,desiredCount,deployments[0].rolloutState]" --output text
+aws ecs describe-services --cluster <ecs-cluster-name> --services <service-name> --region <region> --query "services[0].[runningCount,desiredCount,deployments[0].rolloutState]" --output text
 ```
 
 When image is missing in ECR:
@@ -125,7 +127,7 @@ When image is missing in ECR:
 2. Force ECS service to redeploy:
 
 ```bash
-aws ecs update-service --cluster aws-springboot-jobs --service <service-name> --force-new-deployment --region <region>
+aws ecs update-service --cluster <ecs-cluster-name> --service <service-name> --force-new-deployment --region <region>
 ```
 
 Rate limit note:
@@ -152,8 +154,8 @@ Use this checklist for the first deployment in a new AWS account/region.
 Helpful commands:
 
 ```bash
-aws cloudformation describe-stacks --stack-name aws-springboot-backend --region us-east-1 --query "Stacks[0].Outputs[?OutputKey=='ApiBaseUrl'].OutputValue" --output text
-aws cloudformation describe-stacks --stack-name aws-springboot-backend --region us-east-1 --query "Stacks[0].Outputs[?OutputKey=='ApiHttpsUrl'].OutputValue" --output text
+aws cloudformation describe-stacks --stack-name <backend-stack-name> --region <region> --query "Stacks[0].Outputs[?OutputKey=='ApiBaseUrl'].OutputValue" --output text
+aws cloudformation describe-stacks --stack-name <backend-stack-name> --region <region> --query "Stacks[0].Outputs[?OutputKey=='ApiHttpsUrl'].OutputValue" --output text
 npm run smoke:aws -- <api-base-url> <frontend-url>
 ```
 
@@ -177,6 +179,67 @@ The frontend script will:
 - Invalidate CloudFront cache.
 
 Use the `FrontendUrl` stack output as your public UI URL.
+
+## One script: down/up
+
+Use one script for both zero-cost teardown and full recreate:
+
+```bash
+chmod +x scripts/manage-aws-env.sh
+```
+
+Run in this order.
+
+1. Discover and export base values:
+
+```bash
+export ACCOUNT_ID="$(aws sts get-caller-identity --query 'Account' --output text)"
+export REGION="$(aws configure get region)"
+
+# if REGION is empty, set it manually
+# export REGION=us-east-1
+```
+
+2. Discover network values for `up`:
+
+```bash
+aws ec2 describe-vpcs --region "$REGION" --query 'Vpcs[].{VpcId:VpcId,Cidr:CidrBlock,IsDefault:IsDefault}' --output table
+
+# choose one VPC ID from above
+export VPC_ID=<vpc-id>
+
+aws ec2 describe-subnets --region "$REGION" --filters Name=vpc-id,Values="$VPC_ID" --query 'Subnets[].{SubnetId:SubnetId,AZ:AvailabilityZone,CIDR:CidrBlock}' --output table
+
+# choose two subnet IDs from different AZs
+export SUBNET_A=<subnet-a>
+export SUBNET_B=<subnet-b>
+```
+
+3. Set stack/bucket names (customize once):
+
+```bash
+export SITE_BUCKET_NAME="aws-springboot-frontend-${ACCOUNT_ID}-${REGION}-<suffix>"
+export BACKEND_STACK=<backend-stack-name>
+export FRONTEND_STACK=<frontend-stack-name>
+```
+
+4. Bring everything up (rebuild backend image in CodeBuild, deploy backend + frontend):
+
+```bash
+ACCOUNT_ID="$ACCOUNT_ID" REGION="$REGION" VPC_ID="$VPC_ID" SUBNET_A="$SUBNET_A" SUBNET_B="$SUBNET_B" SITE_BUCKET_NAME="$SITE_BUCKET_NAME" BACKEND_STACK="$BACKEND_STACK" FRONTEND_STACK="$FRONTEND_STACK" ./scripts/manage-aws-env.sh up
+```
+
+5. Bring everything down to near-zero app cost (deletes backend/frontend stacks and app buckets, removes build resources):
+
+```bash
+ACCOUNT_ID="$ACCOUNT_ID" REGION="$REGION" SITE_BUCKET_NAME="$SITE_BUCKET_NAME" BACKEND_STACK="$BACKEND_STACK" FRONTEND_STACK="$FRONTEND_STACK" ./scripts/manage-aws-env.sh down
+```
+
+Notes:
+
+- `up` requires `VPC_ID`, `SUBNET_A`, `SUBNET_B`.
+- `down` intentionally does not delete your VPC/subnets.
+- Script prints final API HTTPS URL and frontend URL after successful `up`.
 
 ## Smoke tests
 
